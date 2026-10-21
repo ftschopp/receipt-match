@@ -1,0 +1,7 @@
+# Local AWS emulator for `npm run dev`: Floci (MIT, open-source LocalStack alternative) provides
+# DynamoDB and S3. Host port 4567 avoids clashing with another emulator on the default 4566.
+services:
+  aws:
+    image: floci/floci:2.2.0
+    ports:
+      - '4567:4566'

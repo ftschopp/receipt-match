@@ -1,0 +1,16 @@
+node_modules
+.serverless
+.esbuild
+dist
+build
+.react-router
+coverage
+.env*
+!.env.example
+.DS_Store
+
+# challenge instructions (not part of the submission)
+*.pdf
+.esbuild
+.react-router
+.gstack/

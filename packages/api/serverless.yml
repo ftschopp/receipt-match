@@ -1,0 +1,183 @@
+service: receipt-match
+frameworkVersion: '3'
+
+plugins:
+  - serverless-esbuild
+  - serverless-offline
+
+params:
+  # `npm run dev`: serverless-offline against the Floci emulator (docker-compose.yml)
+  local:
+    extractor: ${env:EXTRACTOR, 'fixture'}
+    uploadsBucket: receipt-match-uploads-local
+    dynamodbEndpoint: http://localhost:4567
+    s3Endpoint: http://localhost:4567
+    s3ForcePathStyle: 'true'
+    localAccessKeyId: test
+    localSecretAccessKey: test
+  # Deployed stages: real DynamoDB, S3 and Textract
+  default:
+    extractor: textract
+    # Bucket names are global; override the suffix if it is taken.
+    uploadsBucket: receipt-match-uploads-${sls:stage}-${env:BUCKET_SUFFIX, 'rm2026'}
+    dynamodbEndpoint: ''
+    s3Endpoint: ''
+    s3ForcePathStyle: 'false'
+    localAccessKeyId: ''
+    localSecretAccessKey: ''
+
+provider:
+  name: aws
+  runtime: nodejs24.x
+  architecture: arm64
+  region: ${opt:region, 'us-east-1'}
+  stage: ${opt:stage, 'dev'}
+  memorySize: 512
+  timeout: 29
+  logRetentionInDays: 14
+  httpApi:
+    cors: true
+  environment:
+    STAGE: ${sls:stage}
+    TABLE_NAME: receipt-match-${sls:stage}
+    UPLOADS_BUCKET: ${param:uploadsBucket}
+    EXTRACTOR: ${param:extractor}
+    DYNAMODB_ENDPOINT: ${param:dynamodbEndpoint}
+    S3_ENDPOINT: ${param:s3Endpoint}
+    S3_FORCE_PATH_STYLE: ${param:s3ForcePathStyle}
+    LOCAL_ACCESS_KEY_ID: ${param:localAccessKeyId}
+    LOCAL_SECRET_ACCESS_KEY: ${param:localSecretAccessKey}
+    FIXTURES_DIR: ${env:FIXTURES_DIR, '../../fixtures/receipts'}
+  iam:
+    role:
+      # One role for the service, scoped to its own table, bucket and the single Textract action.
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:Query
+            - dynamodb:BatchGetItem
+            - dynamodb:BatchWriteItem
+            - dynamodb:ConditionCheckItem
+          Resource:
+            - !GetAtt ReceiptTable.Arn
+            - !Join ['/', [!GetAtt ReceiptTable.Arn, 'index', '*']]
+        - Effect: Allow
+          Action:
+            - s3:GetObject
+            - s3:PutObject
+          Resource: !Join ['', ['arn:aws:s3:::', '${param:uploadsBucket}', '/*']]
+        - Effect: Allow
+          Action: textract:AnalyzeExpense
+          Resource: '*'
+
+custom:
+  esbuild:
+    bundle: true
+    minify: false
+    sourcemap: true
+    target: node24
+    platform: node
+    format: esm
+    outputFileExtension: .mjs
+    # Some dependencies still call require(); give ESM bundles a CommonJS require.
+    banner:
+      js: "import { createRequire } from 'module'; const require = createRequire(import.meta.url);"
+  serverless-offline:
+    httpPort: 4000
+    lambdaPort: 4002
+    noPrependStageInUrl: true
+
+functions:
+  listEmployees:
+    handler: src/functions/employees/list/lambda.handler
+    events:
+      - httpApi: GET /employees
+  listTransactions:
+    handler: src/functions/transactions/list/lambda.handler
+    events:
+      - httpApi: GET /transactions
+  listReceipts:
+    handler: src/functions/receipts/list/lambda.handler
+    events:
+      - httpApi: GET /receipts
+  createReceipt:
+    handler: src/functions/receipts/create/lambda.handler
+    events:
+      - httpApi: POST /receipts
+  processReceipt:
+    handler: src/functions/receipts/process/lambda.handler
+    # jimp decodes images in JS; more memory also means more CPU on Lambda.
+    memorySize: 1024
+    events:
+      - httpApi: POST /receipts/{id}/process
+  getReceipt:
+    handler: src/functions/receipts/get/lambda.handler
+    events:
+      - httpApi: GET /receipts/{id}
+  setAnchor:
+    handler: src/functions/receipts/set-anchor/lambda.handler
+    events:
+      - httpApi: POST /receipts/{id}/anchor
+  decide:
+    handler: src/functions/receipts/decide/lambda.handler
+    events:
+      - httpApi: POST /receipts/{id}/decision
+
+resources:
+  Resources:
+    ReceiptTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: receipt-match-${sls:stage}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - { AttributeName: PK, AttributeType: S }
+          - { AttributeName: SK, AttributeType: S }
+          - { AttributeName: GSI1PK, AttributeType: S }
+          - { AttributeName: GSI1SK, AttributeType: S }
+          - { AttributeName: GSI2PK, AttributeType: S }
+          - { AttributeName: GSI2SK, AttributeType: S }
+        KeySchema:
+          - { AttributeName: PK, KeyType: HASH }
+          - { AttributeName: SK, KeyType: RANGE }
+        GlobalSecondaryIndexes:
+          - IndexName: GSI1
+            KeySchema:
+              - { AttributeName: GSI1PK, KeyType: HASH }
+              - { AttributeName: GSI1SK, KeyType: RANGE }
+            Projection: { ProjectionType: ALL }
+          - IndexName: GSI2
+            KeySchema:
+              - { AttributeName: GSI2PK, KeyType: HASH }
+              - { AttributeName: GSI2SK, KeyType: RANGE }
+            Projection: { ProjectionType: ALL }
+
+    UploadsBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${param:uploadsBucket}
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+        CorsConfiguration:
+          CorsRules:
+            - AllowedMethods: [GET, PUT]
+              AllowedOrigins: ['*']
+              AllowedHeaders: ['*']
+              MaxAge: 3000
+        LifecycleConfiguration:
+          Rules:
+            - Id: expire-demo-uploads
+              Status: Enabled
+              ExpirationInDays: 30
+
+  Outputs:
+    TableName:
+      Value: !Ref ReceiptTable
+    UploadsBucketName:
+      Value: !Ref UploadsBucket
